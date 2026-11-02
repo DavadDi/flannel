@@ -22,7 +22,7 @@ Flannel uses the `klog` library but only supports logging to stderr. The severit
 
 When running under systemd (e.g. on CoreOS Container Linux) the logs can be viewed with `journalctl -u flanneld`
 
-When flannel is running as a pod on Kubernetes, the logs can be viewed with `kubectl logs --namespace kube-system <POD_ID> -c kube-flannel`. You can find the pod IDs with `kubectl get po --namespace kube-system -l app=flannel`
+When flannel is running as a pod on Kubernetes, the logs can be viewed with `kubectl logs --namespace kube-flannel <POD_ID> -c kube-flannel`. You can find the pod IDs with `kubectl get pod --namespace kube-flannel -l app=flannel`
 
 ## Interface selection and the public IP.
 Most backends require that each node has a unique "public IP" address. This address is chosen when flannel starts. Because leases are tied to the public address, if the address changes, flannel must be restarted.
@@ -39,6 +39,27 @@ Vagrant typically assigns two interfaces to all VMs. The first, for which all ho
 
 This may lead to problems with flannel. By default, flannel selects the first interface on a host. This leads to all hosts thinking they have the same public IP address. To prevent this issue, pass the `--iface=eth1` flag to flannel so that the second interface is chosen.
 
+## NAT
+When the public IP is behind NAT, the UDP checksum fields of the VXLAN packets can be corrupted.
+In that case, try running the following commands to avoid corrupted checksums:
+
+```bash
+/usr/sbin/ethtool -K flannel.1 tx-checksum-ip-generic off
+```
+
+To automate the command above via udev, create `/etc/udev/rules.d/90-flannel.rules` as follows:
+
+```
+SUBSYSTEM=="net", ACTION=="add|change|move", ENV{INTERFACE}=="flannel.1", RUN+="/usr/sbin/ethtool -K flannel.1 tx-checksum-ip-generic off"
+```
+
+<!--
+ref:
+- https://github.com/flannel-io/flannel/issues/1279
+- https://github.com/kubernetes/kops/pull/9074
+- https://github.com/karmab/kcli/commit/b1a8eff658d17cf4e28162f0fa2c8b2b10e5ad00
+-->
+
 ## Permissions
 Depending on the backend being used, flannel may need to run with super user permissions. Examples include creating VXLAN devices or programming routes.  If you see errors similar to the following, confirm that the user running flannel has the right permissions (or try running with `sudo)`.
  * `Error adding route...`
@@ -49,7 +70,7 @@ Depending on the backend being used, flannel may need to run with super user per
 ## Performance
 
 ### Control plane
-Flannel is known to scale to a very large number of hosts. A delay in contacting pods in a newly created host may indicate control plane problems. Flannel doesn't need much CPU or RAM but the first thing to check would be that it has adaquate resources available. Flannel is also reliant on the performance of the datastore, either etcd or the Kubernetes API server. Check that they are performing well.
+Flannel is known to scale to a very large number of hosts. A delay in contacting pods in a newly created host may indicate control plane problems. Flannel doesn't need much CPU or RAM but the first thing to check would be that it has adequate resources available. Flannel is also reliant on the performance of the datastore, either etcd or the Kubernetes API server. Check that they are performing well.
 
 ### Data plane
 Flannel relies on the underlying network so that's the first thing to check if you're seeing poor data plane performance.
@@ -79,7 +100,7 @@ If your nodes do not have a podCIDR, then either use the `--pod-cidr` kubelet co
 
 If `kubeadm` is being used then pass `--pod-network-cidr=10.244.0.0/16` to `kubeadm init` which will ensure that all nodes are automatically assigned a `podCIDR`.
 
-It's possible to manually set the `podCIDR` for each node.
+It's possible (but not generally recommended) to manually set the `podCIDR` to a fixed value for each node. The node subnet ranges must not overlap.
 * `kubectl patch node <NODE_NAME> -p '{"spec":{"podCIDR":"<SUBNET>"}}'`
 
 ## Log messages
@@ -87,4 +108,4 @@ It's possible to manually set the `podCIDR` for each node.
 * `failed to read net conf` - flannel expects to be able to read the net conf from "/etc/kube-flannel/net-conf.json". In the provided manifest, this is set up in the `kube-flannel-cfg` ConfigMap.
 * `error parsing subnet config` - The net conf is malformed. Double check that it has the right content and is valid JSON.
 * `node <NODE_NAME> pod cidr not assigned` - The node doesn't have a `podCIDR` defined. See above for more info.
-* `Failed to create SubnetManager: error retrieving pod spec for 'kube-system/kube-flannel-ds-abc123': the server does not allow access to the requested resource` - The kubernetes cluster has RBAC enabled. Run `https://raw.githubusercontent.com/coreos/flannel/master/Documentation/k8s-manifests/kube-flannel-rbac.yml`
+* `Failed to create SubnetManager: error retrieving pod spec for 'kube-system/kube-flannel-ds-abc123': the server does not allow access to the requested resource` - The kubernetes cluster has RBAC enabled. Run `https://raw.githubusercontent.com/coreos/flannel/master/Documentation/k8s-old-manifests/kube-flannel-rbac.yml`

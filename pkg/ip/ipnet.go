@@ -43,7 +43,10 @@ func FromIP(ip net.IP) IP4 {
 func ParseIP4(s string) (IP4, error) {
 	ip := net.ParseIP(s)
 	if ip == nil {
-		return IP4(0), errors.New("Invalid IP address format")
+		return IP4(0), errors.New("invalid IP address format")
+	}
+	if ip.To4() == nil {
+		return IP4(0), errors.New("invalid IPv4 address format")
 	}
 	return FromIP(ip), nil
 }
@@ -99,6 +102,14 @@ func (ip *IP4) UnmarshalJSON(j []byte) error {
 	}
 }
 
+// IsPrivate reports whether ip is a private address, according to
+// RFC 1918 (IPv4 addresses)
+func (ip IP4) IsPrivate() bool {
+	a, b, _, _ := ip.Octets()
+
+	return a == 10 || (a == 172 && b&0xf0 == 16) || (a == 192 && b == 168)
+}
+
 // similar to net.IPNet but has uint based representation
 type IP4Net struct {
 	IP        IP4
@@ -111,6 +122,14 @@ func (n IP4Net) String() string {
 
 func (n IP4Net) StringSep(octetSep, prefixSep string) string {
 	return fmt.Sprintf("%s%s%d", n.IP.StringSep(octetSep), prefixSep, n.PrefixLen)
+}
+
+func MapIP4ToString(nws []IP4Net) []string {
+	res := make([]string, len(nws))
+	for i := range nws {
+		res[i] = nws[i].String()
+	}
+	return res
 }
 
 func (n IP4Net) Network() IP4Net {
@@ -170,6 +189,12 @@ func (n IP4Net) Contains(ip IP4) bool {
 	return (uint32(n.IP) & n.Mask()) == (uint32(ip) & n.Mask())
 }
 
+func (n *IP4Net) ContainsCIDR(other *IP4Net) bool {
+	ones1 := n.Mask()
+	ones2 := other.Mask()
+	return ones1 <= ones2 && n.Contains(other.IP)
+}
+
 func (n IP4Net) Empty() bool {
 	return n.IP == IP4(0) && n.PrefixLen == uint(0)
 }
@@ -184,6 +209,8 @@ func (n *IP4Net) UnmarshalJSON(j []byte) error {
 	j = bytes.Trim(j, "\"")
 	if _, val, err := net.ParseCIDR(string(j)); err != nil {
 		return err
+	} else if val.IP.To4() == nil {
+		return errors.New("invalid IPv4 CIDR format")
 	} else {
 		*n = FromIPNet(val)
 		return nil

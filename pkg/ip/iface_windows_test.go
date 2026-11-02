@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 // Copyright 2017 flannel authors
@@ -26,7 +27,7 @@ func TestGetInterfaceIP4Addr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = GetInterfaceIP4Addr(iface)
+	_, err = GetInterfaceIP4Addrs(iface)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,18 +46,20 @@ func TestGetInterfaceByIP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	defaultIpv4Addr, err := GetInterfaceIP4Addr(defaultIface)
+	defaultIpv4Addr, err := GetInterfaceIP4Addrs(defaultIface)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	iface, err := GetInterfaceByIP(defaultIpv4Addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, addr := range defaultIpv4Addr {
+		iface, err := GetInterfaceByIP(addr)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if iface.Index != defaultIface.Index {
-		t.Fatalf("iface.Index(%d) != defaultIface.Index(%d)", iface.Index, defaultIface.Index)
+		if iface.Index != defaultIface.Index {
+			t.Fatalf("iface.Index(%d) != defaultIface.Index(%d)", iface.Index, defaultIface.Index)
+		}
 	}
 }
 

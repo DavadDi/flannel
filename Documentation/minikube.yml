@@ -20,7 +20,7 @@ data:
   cni-conf.json: |
     {
       "name": "cbr0",
-      "cniVersion": "0.3.1",
+      "cniVersion": "1.0.0",
       "type": "flannel",
       "delegate": {
         "hairpinMode": true,
@@ -62,9 +62,6 @@ spec:
         - --kube-subnet-mgr
         resources:
           requests:
-            cpu: "100m"
-            memory: "50Mi"
-          limits:
             cpu: "100m"
             memory: "50Mi"
         securityContext:

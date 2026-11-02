@@ -41,7 +41,7 @@ func FromIP6(ip net.IP) *IP6 {
 func ParseIP6(s string) (*IP6, error) {
 	ip := net.ParseIP(s)
 	if ip == nil {
-		return (*IP6)(big.NewInt(0)), errors.New("Invalid IP address format")
+		return (*IP6)(big.NewInt(0)), errors.New("invalid IP address format")
 	}
 	return FromIP6(ip), nil
 }
@@ -67,10 +67,7 @@ func GetIPv6SubnetMax(networkIP *IP6, subnetSize *big.Int) *IP6 {
 }
 
 func CheckIPv6Subnet(subnetIP *IP6, mask *big.Int) bool {
-	if (*big.Int)(subnetIP).Cmp(big.NewInt(0).And((*big.Int)(subnetIP), mask)) != 0 {
-		return false
-	}
-	return true
+	return (*big.Int)(subnetIP).Cmp(big.NewInt(0).And((*big.Int)(subnetIP), mask)) == 0
 }
 
 func MustParseIP6(s string) *IP6 {
@@ -110,6 +107,16 @@ func (ip6 *IP6) UnmarshalJSON(j []byte) error {
 	}
 }
 
+func (ip6 *IP6) Cmp(other *IP6) int {
+	return (*big.Int)(ip6).Cmp((*big.Int)(other))
+}
+
+// IsPrivate reports whether ip is a private address, according to
+// RFC 4193 (IPv6 addresses).
+func (ip6 *IP6) IsPrivate() bool {
+	return (*big.Int)(ip6).Bytes()[0]&0xfe == 0xfc
+}
+
 // similar to net.IPNet but has uint based representation
 type IP6Net struct {
 	IP        *IP6
@@ -125,6 +132,14 @@ func (n IP6Net) String() string {
 
 func (n IP6Net) StringSep(hexSep, prefixSep string) string {
 	return fmt.Sprintf("%s%s%d", n.IP.String(), prefixSep, n.PrefixLen)
+}
+
+func MapIP6ToString(nws []IP6Net) []string {
+	res := make([]string, len(nws))
+	for i := range nws {
+		res[i] = nws[i].String()
+	}
+	return res
 }
 
 func (n IP6Net) Network() IP6Net {
@@ -189,8 +204,14 @@ func (n IP6Net) Contains(ip *IP6) bool {
 	return (IP6)(*network).String() == (IP6)(*subnet).String()
 }
 
+func (n *IP6Net) ContainsCIDR(other *IP6Net) bool {
+	ones1 := n.Mask()
+	ones2 := other.Mask()
+	return ones1.Cmp(ones2) <= 0 && n.Contains(other.IP)
+}
+
 func (n IP6Net) Empty() bool {
-	return n.IP == (*IP6)(big.NewInt(0)) && n.PrefixLen == uint(0)
+	return IsEmpty(n.IP) && n.PrefixLen == uint(0)
 }
 
 // MarshalJSON: json.Marshaler impl

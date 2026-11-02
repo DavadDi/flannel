@@ -1,11 +1,38 @@
-.PHONY: test e2e-test cover gofmt gofmt-fix header-check clean tar.gz docker-push release docker-push-all flannel-git docker-manifest-amend docker-manifest-push
+.PHONY: test unit-test e2e-test chart-test kind-e2e-test deps cover gofmt gofmt-fix license-check clean tar.gz release buildx-create-builder build-multi-arch release-manifest release-helm
 
 # Registry used for publishing images
 REGISTRY?=quay.io/coreos/flannel
-QEMU_VERSION=v3.0.0
+HELM_UNITTEST_VERSION?=v1.1.1
+HELM_UNITTEST_VERSION_NUMBER:=$(patsubst v%,%,$(HELM_UNITTEST_VERSION))
+QEMU_VERSION=v7.2.0-1
+
+# Fill these with expected SHA256 values for each qemu static binary.
+QEMU_SHA256_AMD64?=7132ffd39aef71c26d3344cc0c7dffc530e10e3e720c58c8279a97ef6fdd7784
+QEMU_SHA256_ARM?=9f07762a3cd0f8a199cb5471a92402a4765f8e2fcb7fe91a87ee75da9616a806
+QEMU_SHA256_ARM64?=dce64b2dc6b005485c7aa735a7ea39cb0006bf7e5badc28b324b2cd0c73d883f
+QEMU_SHA256_PPC64LE?=a8855b9a9cdefbe2163d9f7851fb71c77207d816451237caed616eb9b03229ac
+QEMU_SHA256_S390X?=a438ab2f7c2e0f0ffe63992bccedaf60d789cfb1849e035c0764bda7d9e73a9a
+QEMU_SHA256_RISCV64?=3d25c6ec0523cf36e51ccd32ecefebed1752958ef384d10ba84c059ac26a4b3c
+QEMU_SHA256_LOONG64?=bc6c99470ad792a3b509489031084824248ade4c1047e25b17865845cd7da51d
+
+QEMU_ASSET_amd64=qemu-x86_64-static
+QEMU_ASSET_arm=qemu-arm-static
+QEMU_ASSET_arm64=qemu-aarch64-static
+QEMU_ASSET_ppc64le=qemu-ppc64le-static
+QEMU_ASSET_s390x=qemu-s390x-static
+QEMU_ASSET_riscv64=qemu-riscv64-static
+QEMU_ASSET_loong64=qemu-loongarch64-static
+
+QEMU_SHA256_amd64=$(QEMU_SHA256_AMD64)
+QEMU_SHA256_arm=$(QEMU_SHA256_ARM)
+QEMU_SHA256_arm64=$(QEMU_SHA256_ARM64)
+QEMU_SHA256_ppc64le=$(QEMU_SHA256_PPC64LE)
+QEMU_SHA256_s390x=$(QEMU_SHA256_S390X)
+QEMU_SHA256_riscv64=$(QEMU_SHA256_RISCV64)
+QEMU_SHA256_loong64=$(QEMU_SHA256_LOONG64)
 
 # Default tag and architecture. Can be overridden
-TAG?=$(shell git describe --tags --dirty --always)
+TAG?=$(shell git describe --tags --always)
 ARCH?=amd64
 # Only enable CGO (and build the UDP backend) on AMD64
 ifeq ($(ARCH),amd64)
@@ -15,17 +42,17 @@ else
 endif
 
 # Go version to use for builds
-GO_VERSION=1.15.5
+GO_VERSION=1.26
 
 # K8s version used for Makefile helpers
-K8S_VERSION=v1.6.6
+K8S_VERSION=1.34.6
 
 GOARM=7
 
 # These variables can be overridden by setting an environment variable.
-TEST_PACKAGES?=pkg/ip subnet subnet/etcdv2 network backend
+TEST_PACKAGES?=pkg/ip pkg/subnet pkg/subnet/etcd pkg/subnet/kube pkg/trafficmngr pkg/backend
 TEST_PACKAGES_EXPANDED=$(TEST_PACKAGES:%=github.com/flannel-io/flannel/%)
-PACKAGES?=$(TEST_PACKAGES) network
+PACKAGES?=$(TEST_PACKAGES)
 PACKAGES_EXPANDED=$(PACKAGES:%=github.com/flannel-io/flannel/%)
 
 ### BUILDING
@@ -37,17 +64,17 @@ clean:
 	rm -f dist/qemu-*
 
 dist/flanneld: $(shell find . -type f  -name '*.go')
-	go build -o dist/flanneld \
-	  -ldflags '-s -w -X github.com/flannel-io/flannel/version.Version=$(TAG) -extldflags "-static"'
+	CGO_ENABLED=$(CGO_ENABLED) go build -o dist/flanneld \
+	  -ldflags '-s -w -X github.com/flannel-io/flannel/pkg/version.Version=$(TAG) -extldflags "-static"'
 
 dist/flanneld.exe: $(shell find . -type f  -name '*.go')
 	CXX=x86_64-w64-mingw32-g++ CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows go build -o dist/flanneld.exe \
-	  -ldflags '-s -w -X github.com/flannel-io/flannel/version.Version=$(TAG) -extldflags "-static"'
+	  -ldflags '-s -w -X github.com/flannel-io/flannel/pkg/version.Version=$(TAG) -extldflags "-static"'
 
 # This will build flannel natively using golang image
-dist/flanneld-$(ARCH): dist/qemu-$(ARCH)-static
-	# valid values for ARCH are [amd64 arm arm64 ppc64le s390x]
-	docker run -e CGO_ENABLED=$(CGO_ENABLED) -e GOARCH=$(ARCH) -e GOCACHE=/go \
+dist/flanneld-$(ARCH): deps dist/qemu-$(ARCH)-static
+	# valid values for ARCH are [amd64 arm arm64 ppc64le s390x riscv64 loong64]
+	docker run --rm -e CGO_ENABLED=$(CGO_ENABLED) -e GOARCH=$(ARCH) -e GOCACHE=/go \
 		-u $(shell id -u):$(shell id -g) \
 		-v $(CURDIR)/dist/qemu-$(ARCH)-static:/usr/bin/qemu-$(ARCH)-static \
 		-v $(CURDIR):/go/src/github.com/flannel-io/flannel:ro \
@@ -58,46 +85,72 @@ dist/flanneld-$(ARCH): dist/qemu-$(ARCH)-static
 		mv dist/flanneld dist/flanneld-$(ARCH)'
 
 ## Create a docker image on disk for a specific arch and tag
-image:	dist/flanneld-$(TAG)-$(ARCH).docker
-dist/flanneld-$(TAG)-$(ARCH).docker: dist/flanneld-$(ARCH)
-	docker build -f Dockerfile.$(ARCH) -t $(REGISTRY):$(TAG)-$(ARCH) .
+image:	deps dist/flanneld-$(TAG)-$(ARCH).docker
+dist/flanneld-$(TAG)-$(ARCH).docker:
+	docker buildx build -f images/Dockerfile --platform=$(ARCH) --build-arg TAG=$(TAG) -t $(REGISTRY):$(TAG)-$(ARCH) --load .
 	docker save -o dist/flanneld-$(TAG)-$(ARCH).docker $(REGISTRY):$(TAG)-$(ARCH)
 
-# amd64 gets an image with the suffix too (i.e. it's the default)
+# amd64 gets an image without the suffix too (i.e. it's the default)
 ifeq ($(ARCH),amd64)
-	docker build -f Dockerfile.$(ARCH) -t $(REGISTRY):$(TAG) .
+	docker build -f images/Dockerfile --platform=$(ARCH) --build-arg TAG=$(TAG) -t $(REGISTRY):$(TAG) .
 endif
 
 ### TESTING
-test: header-check gofmt verify-modules
-	# Run the unit tests
-	# NET_ADMIN capacity is required to do some network operation
-	# SYS_ADMIN capacity is required to create network namespace
-	docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN --rm -v $(shell pwd):/go/src/github.com/flannel-io/flannel golang:$(GO_VERSION) go test -v -cover $(TEST_PACKAGES_EXPANDED)
+test: license-check gofmt deps verify-modules
+	make unit-test
 
 	# Test the docker-opts script
-	cd dist; ./mk-docker-opts_tests.sh
+	go test ./dist/
 
 	# Run the functional tests
 	make e2e-test
 
-e2e-test: bash_unit dist/flanneld-e2e-$(TAG)-$(ARCH).docker
+unit-test:
+	# Run the unit tests
+	# NET_ADMIN capacity is required to do some network operation
+	# SYS_ADMIN capacity is required to create network namespace
+	docker run --cap-add=NET_ADMIN \
+		--cap-add=SYS_ADMIN --rm \
+		-v $(shell pwd):/go/src/github.com/flannel-io/flannel \
+		golang:$(GO_VERSION) \
+		/bin/bash -c 'cd /go/src/github.com/flannel-io/flannel && go test -v -cover -timeout 5m $(TEST_PACKAGES_EXPANDED)'
+
+e2e-test: dist/flanneld-$(TAG)-$(ARCH).docker
 	$(MAKE) -C images/iperf3 ARCH=$(ARCH)
-	FLANNEL_DOCKER_IMAGE=$(REGISTRY):$(TAG)-$(ARCH) ./bash_unit dist/functional-test.sh
-	FLANNEL_DOCKER_IMAGE=$(REGISTRY):$(TAG)-$(ARCH) ./bash_unit dist/functional-test-k8s.sh
+	FLANNEL_DOCKER_IMAGE=$(REGISTRY):$(TAG)-$(ARCH) ARCH=$(ARCH) \
+		go test -tags functional -timeout 60m -v ./functional/...
+
+chart-test:
+	@set -e; \
+	plugin_list=$$(helm plugin list); \
+	installed_version=$$(printf '%s\n' "$$plugin_list" | awk 'NR>1 && $$1 == "unittest" { print $$2; exit }'); \
+	if [ "$$installed_version" != "$(HELM_UNITTEST_VERSION_NUMBER)" ]; then \
+		if [ -n "$$installed_version" ]; then helm plugin uninstall unittest; fi; \
+		helm plugin install --version $(HELM_UNITTEST_VERSION) https://github.com/helm-unittest/helm-unittest; \
+	fi
+	helm unittest ./chart/kube-flannel
+
+kind-e2e-test: dist/flanneld-$(TAG)-$(ARCH).docker
+	@echo "Building iperf3 image for $(ARCH)..."
+	$(MAKE) -C images/iperf3 ARCH=$(ARCH) || { echo "ERROR: Failed to build iperf3 image for $(ARCH)"; exit 1; }
+	@echo "Running kind e2e tests with Ginkgo..."
+	cd e2e && FLANNEL_IMAGE=$(REGISTRY):$(TAG)-$(ARCH) ARCH=$(ARCH) TAG=$(TAG) IP_FAMILY=$(IP_FAMILY) \
+		go test -tags e2e -timeout 60m -v ./...
 
 cover:
 	# A single package must be given - e.g. 'PACKAGES=pkg/ip make cover'
 	go test -coverprofile cover.out $(PACKAGES_EXPANDED)
 	go tool cover -html=cover.out
 
-header-check:
-	./header-check.sh
+license-check:
+	# run license-check script
+	dist/license-check.sh
 
 # Throw an error if gofmt finds problems.
 # "read" will return a failure return code if there is no output. This is inverted wth the "!"
 gofmt:
-	docker run -e CGO_ENABLED=$(CGO_ENABLED) -e GOARCH=$(ARCH) \
+	# Running gofmt...
+	docker run --rm -e CGO_ENABLED=$(CGO_ENABLED) -e GOARCH=$(ARCH) \
 		-u $(shell id -u):$(shell id -g) \
 		-v $(CURDIR):/go/src/github.com/flannel-io/flannel \
 		-v $(CURDIR)/dist:/go/src/github.com/flannel-io/flannel/dist \
@@ -106,61 +159,57 @@ gofmt:
 		! gofmt -d $(PACKAGES) 2>&1 | read'
 
 verify-modules:
-	$(if $(shell which go),,$(error "go not found in PATH"))
-	go mod tidy
-	go vet
+	# Running verify-modules...
+	docker run --rm -e CGO_ENABLED=$(CGO_ENABLED) -e GOARCH=$(ARCH) \
+                -u $(shell id -u):$(shell id -g) \
+                -v $(CURDIR):/go/src/github.com/flannel-io/flannel \
+                -v $(CURDIR)/dist:/go/src/github.com/flannel-io/flannel/dist \
+                golang:$(GO_VERSION) /bin/bash -c '\
+                cd /go/src/github.com/flannel-io/flannel && \
+		!go mod tidy 2>&1|read && \
+		!go vet 2>&1|read'
 
-gofmt-fix:
-	docker run -e CGO_ENABLED=$(CGO_ENABLED) -e GOARCH=$(ARCH) \
-		-u $(shell id -u):$(shell id -g) \
-		-v $(CURDIR):/go/src/github.com/flannel-io/flannel \
-		-v $(CURDIR)/dist:/go/src/github.com/flannel-io/flannel/dist \
-		golang:$(GO_VERSION) /bin/bash -c '\
-		cd /go/src/github.com/flannel-io/flannel && \
-		gofmt -w $(PACKAGES)'
 
-bash_unit:
-	wget https://raw.githubusercontent.com/pgrange/bash_unit/v1.6.0/bash_unit
-	chmod +x bash_unit
 
-# This will build flannel natively using golang image
-dist/flanneld-e2e-$(TAG)-$(ARCH).docker:
-ifneq ($(ARCH),amd64)
-	$(MAKE) dist/qemu-$(ARCH)-static
-endif
-	# valid values for ARCH are [amd64 arm arm64 ppc64le s390x]
-	docker run -e GOARM=$(GOARM) -e GOCACHE=/go \
-		-u $(shell id -u):$(shell id -g) \
-		-v $(CURDIR):/go/src/github.com/flannel-io/flannel:ro \
-		-v $(CURDIR)/dist:/go/src/github.com/flannel-io/flannel/dist \
-		golang:$(GO_VERSION) /bin/bash -c '\
-		cd /go/src/github.com/flannel-io/flannel && \
-		CGO_ENABLED=1 make -e dist/flanneld && \
-		mv dist/flanneld dist/flanneld-$(ARCH)'
-	docker build -f Dockerfile.$(ARCH) -t $(REGISTRY):$(TAG)-$(ARCH) .
 
 # Make a release after creating a tag
 # To build cross platform Docker images, the qemu-static binaries are needed. On ubuntu "apt-get install  qemu-user-static"
-release: tar.gz dist/qemu-s390x-static dist/qemu-ppc64le-static dist/qemu-aarch64-static dist/qemu-arm-static #release-tests
+release: tar.gz dist/qemu-s390x-static dist/qemu-ppc64le-static dist/qemu-arm64-static dist/qemu-arm-static dist/qemu-riscv64-static
 	ARCH=amd64 make dist/flanneld-$(TAG)-amd64.docker
 	ARCH=arm make dist/flanneld-$(TAG)-arm.docker
 	ARCH=arm64 make dist/flanneld-$(TAG)-arm64.docker
 	ARCH=ppc64le make dist/flanneld-$(TAG)-ppc64le.docker
 	ARCH=s390x make dist/flanneld-$(TAG)-s390x.docker
+	ARCH=riscv64 make dist/flanneld-$(TAG)-riscv64.docker
 	@echo "Everything should be built for $(TAG)"
 	@echo "Add all flanneld-* and *.tar.gz files from dist/ to the Github release"
 	@echo "Use make docker-push-all to push the images to a registry"
 
-dist/qemu-%-static:
-	if [ "$(@F)" = "qemu-amd64-static" ]; then \
-		wget -O dist/qemu-amd64-static https://github.com/multiarch/qemu-user-static/releases/download/$(QEMU_VERSION)/qemu-x86_64-static; \
-	elif [ "$(@F)" = "qemu-arm64-static" ]; then \
-		wget -O dist/qemu-arm64-static https://github.com/multiarch/qemu-user-static/releases/download/$(QEMU_VERSION)/qemu-aarch64-static; \
-	else \
-		wget -O dist/$(@F) https://github.com/multiarch/qemu-user-static/releases/download/$(QEMU_VERSION)/$(@F); \
-	fi 
+release-manifest:
+	sed -i 's/^  newTag: .*/  newTag: $(TAG)/' Documentation/kustomization/kube-flannel/kustomization.yaml
+	kubectl kustomize ./Documentation/kustomization/kube-flannel/ > dist/kube-flannel.yml
 
-## Build a .tar.gz for the amd64 ppc64le arm arm64 flanneld binary
+release-helm:
+	sed -i '0,/^    tag: .*/s//    tag: $(TAG)/' ./chart/kube-flannel/values.yaml
+	helm package ./chart/kube-flannel/ --destination chart/ --version $(TAG) --app-version $(TAG)
+	cp chart/flannel-$(TAG).tgz dist/flannel.tgz
+	mv chart/flannel-$(TAG).tgz chart/flannel.tgz
+	wget https://flannel-io.github.io/flannel/index.yaml -O chart/index.yaml
+	helm repo index --merge chart/index.yaml --url https://github.com/flannel-io/flannel/releases/download/$(TAG)/ chart/
+
+dist/qemu-%-static:
+	@if [ -z "$(QEMU_ASSET_$*)" ]; then \
+		echo "Unsupported qemu target: $(@F)"; \
+		exit 1; \
+	fi
+	@if [ -z "$(QEMU_SHA256_$*)" ]; then \
+		echo "Missing SHA256 for $(@F). Set the corresponding QEMU_SHA256_* variable."; \
+		exit 1; \
+	fi
+	@wget -O dist/$(@F) https://github.com/multiarch/qemu-user-static/releases/download/$(QEMU_VERSION)/$(QEMU_ASSET_$*)
+	@echo "$(QEMU_SHA256_$*)  dist/$(@F)" | sha256sum --check --status
+
+## Build a .tar.gz for the amd64 ppc64le arm arm64 riscv64 flanneld binary
 tar.gz:
 	ARCH=amd64 make dist/flanneld-amd64
 	tar --transform='flags=r;s|-amd64||' -zcvf dist/flannel-$(TAG)-linux-amd64.tar.gz -C dist flanneld-amd64 mk-docker-opts.sh ../README.md
@@ -180,105 +229,21 @@ tar.gz:
 	ARCH=s390x make dist/flanneld-s390x
 	tar --transform='flags=r;s|-s390x||' -zcvf dist/flannel-$(TAG)-linux-s390x.tar.gz -C dist flanneld-s390x mk-docker-opts.sh ../README.md
 	tar -tvf dist/flannel-$(TAG)-linux-s390x.tar.gz
-
-release-tests: release-etcd-tests release-k8s-tests
-
-release-etcd-tests: bash_unit
-	# Run the functional tests with different etcd versions.
-	ETCD_IMG="quay.io/coreos/etcd:latest"  ./bash_unit dist/functional-test.sh
-	ETCD_IMG="quay.io/coreos/etcd:v3.2.7"  ./bash_unit dist/functional-test.sh
-	# Etcd v2 docker image format is different. Override the etcd binary location so it works.
-	ETCD_IMG="quay.io/coreos/etcd:v2.3.8"  ETCD_LOCATION=" " ./bash_unit dist/functional-test.sh
-
-release-k8s-tests: bash_unit
-	# Run the functional tests with different k8s versions. Currently these are the latest point releases.
-	# This list should be updated during the release process.
-	K8S_VERSION="1.17.3" HYPERKUBE_CMD=" " HYPERKUBE_APISERVER_CMD="kube-apiserver" ./bash_unit dist/functional-test-k8s.sh
-	K8S_VERSION="1.16.7" HYPERKUBE_CMD=" " HYPERKUBE_APISERVER_CMD="kube-apiserver" ./bash_unit dist/functional-test-k8s.sh
-	K8S_VERSION="1.15.10" HYPERKUBE_CMD=" " HYPERKUBE_APISERVER_CMD="kube-apiserver" ./bash_unit dist/functional-test-k8s.sh
-	# K8S_VERSION="1.7.6"  ./bash_unit dist/functional-test-k8s.sh
-	# K8S_VERSION="1.6.10" ./bash_unit dist/functional-test-k8s.sh
-	# K8S_VERSION="1.5.7"  ./bash_unit dist/functional-test-k8s.sh   #kube-flannel.yml is incompatible
-	# K8S_VERSION="1.4.12" ./bash_unit dist/functional-test-k8s.sh   #kube-flannel.yml is incompatible
-	# K8S_VERSION="1.3.10" ./bash_unit dist/functional-test-k8s.sh   #kube-flannel.yml is incompatible
-
-docker-push: dist/flanneld-$(TAG)-$(ARCH).docker
-	docker push $(REGISTRY):$(TAG)-$(ARCH)
-
-docker-manifest-amend:
-	DOCKER_CLI_EXPERIMENTAL=enabled docker manifest create --amend $(REGISTRY):$(TAG) $(REGISTRY):$(TAG)-$(ARCH)
-
-docker-manifest-push:
-	DOCKER_CLI_EXPERIMENTAL=enabled docker manifest push --purge $(REGISTRY):$(TAG)
-
-docker-push-all:
-	ARCH=amd64 make docker-push docker-manifest-amend
-	ARCH=arm make docker-push docker-manifest-amend
-	ARCH=arm64 make docker-push docker-manifest-amend
-	ARCH=ppc64le make docker-push docker-manifest-amend
-	ARCH=s390x make docker-push docker-manifest-amend
-	make docker-manifest-push
-
-flannel-git:
-	ARCH=amd64 REGISTRY=quay.io/coreos/flannel-git make clean dist/flanneld-$(TAG)-amd64.docker docker-push docker-manifest-amend
-	ARCH=arm REGISTRY=quay.io/coreos/flannel-git make clean dist/flanneld-$(TAG)-arm.docker docker-push docker-manifest-amend
-	ARCH=arm64 REGISTRY=quay.io/coreos/flannel-git make clean dist/flanneld-$(TAG)-arm64.docker docker-push docker-manifest-amend
-	ARCH=ppc64le REGISTRY=quay.io/coreos/flannel-git make clean dist/flanneld-$(TAG)-ppc64le.docker docker-push docker-manifest-amend
-	ARCH=s390x REGISTRY=quay.io/coreos/flannel-git make clean dist/flanneld-$(TAG)-s390x.docker docker-push docker-manifest-amend
-	REGISTRY=quay.io/coreos/flannel-git make docker-manifest-push
+	ARCH=riscv64 make dist/flanneld-riscv64
+	tar --transform='flags=r;s|-riscv64||' -zcvf dist/flannel-$(TAG)-linux-riscv64.tar.gz -C dist flanneld-riscv64 mk-docker-opts.sh ../README.md
+	tar -tvf dist/flannel-$(TAG)-linux-riscv64.tar.gz
 
 install:
 	# This is intended as just a developer convenience to help speed up non-containerized builds
 	# It is NOT how you install flannel
-	CGO_ENABLED=1 go install -v github.com/flannel-io/flannel
+	CGO_ENABLED=$(CGO_ENABLED) go install -v github.com/flannel-io/flannel
 
-minikube-start:
-	minikube start --network-plugin cni
+deps:
+	go mod tidy
+	go mod vendor
 
-minikube-build-image:
-	CGO_ENABLED=1 go build -v -o dist/flanneld-amd64
-	# Make sure the minikube docker is being used "eval $(minikube docker-env)"
-	sh -c 'eval $$(minikube docker-env) && docker build -f Dockerfile.amd64 -t flannel/minikube .'
+buildx-create-builder:
+	docker buildx create --name mybuilder --use --bootstrap
 
-minikube-deploy-flannel:
-	kubectl apply -f Documentation/minikube.yml
-
-minikube-remove-flannel:
-	kubectl delete -f Documentation/minikube.yml
-
-minikube-restart-pod:
-	# Use this to pick up a new image
-	kubectl delete pods -l app=flannel --grace-period=0
-
-kubernetes-logs:
-	kubectl logs `kubectl get po -l app=flannel -o=custom-columns=NAME:metadata.name --no-headers=true` -c kube-flannel -f
-
-LOCAL_IP_ENV?=$(shell ip route get 8.8.8.8 | head -1 | awk '{print $$7}')
-run-etcd: stop-etcd
-	docker run --detach \
-	-p 2379:2379 \
-	--name flannel-etcd quay.io/coreos/etcd \
-	etcd \
-	--advertise-client-urls "http://$(LOCAL_IP_ENV):2379,http://127.0.0.1:2379,http://$(LOCAL_IP_ENV):4001,http://127.0.0.1:4001" \
-	--listen-client-urls "http://0.0.0.0:2379,http://0.0.0.0:4001"
-
-stop-etcd:
-	@-docker rm -f flannel-etcd
-
-run-k8s-apiserver: stop-k8s-apiserver
-	docker run --detach --net=host \
-	  --name calico-k8s-apiserver \
-	gcr.io/google_containers/hyperkube-amd64:$(K8S_VERSION) \
-		  /hyperkube apiserver --etcd-servers=http://$(LOCAL_IP_ENV):2379 \
-		  --service-cluster-ip-range=10.101.0.0/16
-
-stop-k8s-apiserver:
-	@-docker rm -f calico-k8s-apiserver
-
-run-local-kube-flannel-with-prereqs: run-etcd run-k8s-apiserver dist/flanneld
-	while ! kubectl apply -f dist/fake-node.yaml; do sleep 1; done
-	$(MAKE) run-local-kube-flannel
-
-run-local-kube-flannel:
-	# Currently this requires the netconf to be in /etc/kube-flannel/net-conf.json
-	sudo NODE_NAME=test dist/flanneld --kube-subnet-mgr --kube-api-url http://127.0.0.1:8080
+build-multi-arch:
+	docker buildx build  --platform linux/amd64,linux/arm64,linux/arm,linux/s390x,linux/ppc64le,linux/riscv64 -t $(REGISTRY):$(TAG) -f images/Dockerfile --build-arg TAG=$(TAG) -o type=oci,dest=dist/flannel_oci.tar --progress plain .

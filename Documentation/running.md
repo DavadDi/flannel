@@ -8,7 +8,7 @@ It will also monitor `etcd` for new members of the network and adjust the routes
 
 After flannel has acquired the subnet and configured backend, it will write out an environment variable file (`/run/flannel/subnet.env` by default) with subnet address and MTU that it supports.
 
-For more information on checking the IP range for a specific host, see [Leases and Reservations][leases].
+For more information on checking the IP range for a specific host, see [Leases and Reservations](https://github.com/flannel-io/flannel/blob/master/Documentation/reservations.md).
 
 ## Multiple networks
 
@@ -23,19 +23,19 @@ flanneld -subnet-file /vxlan.env -etcd-prefix=/vxlan/network
 
 1. Download a `flannel` binary.
 ```bash
-wget https://github.com/flannel-io/flannel/releases/download/v0.13.0/flanneld-amd64 && chmod +x flanneld-amd64
+wget https://github.com/flannel-io/flannel/releases/latest/download/flanneld-amd64 && chmod +x flanneld-amd64
 ```
 2. Run the binary.
 ```bash
 sudo ./flanneld-amd64 # it will hang waiting to talk to etcd
 ```
-3. Run `etcd`. Follow the instructions on the [CoreOS etcd page][coreos-etcd], or, if you have docker just do
+3. Run `etcd`. Follow the instructions on the [etcd page](https://etcd.io/docs/v3.5/quickstart/), or, if you have docker just do
 ```bash
 docker run --rm --net=host quay.io/coreos/etcd
 ```
-4. Observe that `flannel` can now talk to `etcd`, but can't find any config. So write some config. Either get `etcdctl` from the [CoreOS etcd page][coreos-etcd], or use `docker` again.
+4. Observe that `flannel` can now talk to `etcd`, but can't find any config. So write some config. Either get `etcdctl` from the [etcd page](https://etcd.io/docs/v3.5/quickstart/), or use `docker` again.
 ```bash
-docker run --rm --net=host quay.io/coreos/etcd etcdctl set /coreos.com/network/config '{ "Network": "10.5.0.0/16", "Backend": {"Type": "vxlan"}}'
+docker run --rm -e ETCDCTL_API=3 --net=host quay.io/coreos/etcd etcdctl put /coreos.com/network/config '{ "Network": "10.5.0.0/16", "Backend": {"Type": "vxlan"}}'
 ```
 Now `flannel` is running, it has created a VXLAN tunnel device on the host and written a subnet config file
 
@@ -60,6 +60,7 @@ FLANNEL_IPMASQ=false
 ```
 etcd network value is `10.6.0.0/16`. Since `10.5.72.1/24` is outside of this network, a new lease will be allocated.
 ```bash
+export ETCDCTL_API=3
 etcdctl get /coreos.com/network/config
 { "Network": "10.6.0.0/16", "Backend": {"Type": "vxlan"}}
 ```
@@ -104,11 +105,6 @@ source /run/flannel/subnet.env
 docker network create --attachable=true --subnet=${FLANNEL_SUBNET} -o "com.docker.network.driver.mtu"=${FLANNEL_MTU} flannel
 ```
 
-## CoreOS integration
-
-CoreOS ships with flannel integrated into the distribution.
-See [Configuring flannel for container networking][configuring-flannel] for more information.
-
 ## Running on Vagrant
 
 Vagrant has a tendency to give the default interface (one with the default route) a non-unique IP (often 10.0.2.15).
@@ -116,8 +112,6 @@ Vagrant has a tendency to give the default interface (one with the default route
 This causes flannel to register multiple nodes with the same IP.
 
 To work around this issue, use `--iface` option to specify the interface that has a unique IP.
-
-If you're running on CoreOS, use `cloud-config` to set `coreos.flannel.interface` to `$public_ipv4`.
 
 ## Zero-downtime restarts
 
@@ -128,8 +122,3 @@ As such, `flanneld` can be restarted (even to do an upgrade) without disturbing 
 However in the case of `vxlan` backend, this needs to be done within a few seconds as ARP entries can start to timeout requiring the flannel daemon to refresh them.
 
 Also, to avoid interruptions during restart, the configuration must not be changed (e.g. VNI, --iface values).
-
-
-[coreos-etcd]: https://github.com/coreos/etcd/blob/master/Documentation/dev-guide/local_cluster.md
-[configuring-flannel]: https://coreos.com/docs/cluster-management/setup/flannel-config/
-[leases]: reservations.md

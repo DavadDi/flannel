@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 // Copyright 2015 flannel authors
@@ -20,15 +21,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"syscall"
 
 	"github.com/vishvananda/netlink"
-	log "k8s.io/klog"
+	"golang.org/x/sys/unix"
+	log "k8s.io/klog/v2"
 )
 
 func getIfaceAddrs(iface *net.Interface) ([]netlink.Addr, error) {
 	link := &netlink.Device{
-		netlink.LinkAttrs{
+		LinkAttrs: netlink.LinkAttrs{
 			Index: iface.Index,
 		},
 	}
@@ -38,7 +41,7 @@ func getIfaceAddrs(iface *net.Interface) ([]netlink.Addr, error) {
 
 func getIfaceV6Addrs(iface *net.Interface) ([]netlink.Addr, error) {
 	link := &netlink.Device{
-		netlink.LinkAttrs{
+		LinkAttrs: netlink.LinkAttrs{
 			Index: iface.Index,
 		},
 	}
@@ -46,66 +49,60 @@ func getIfaceV6Addrs(iface *net.Interface) ([]netlink.Addr, error) {
 	return netlink.AddrList(link, syscall.AF_INET6)
 }
 
-func GetInterfaceIP4Addr(iface *net.Interface) (net.IP, error) {
+func GetInterfaceIP4Addrs(iface *net.Interface) ([]net.IP, error) {
 	addrs, err := getIfaceAddrs(iface)
 	if err != nil {
 		return nil, err
 	}
 
-	// prefer non link-local addr
-	var ll net.IP
+	// sort addresses in preferred usage order
+	slices.SortFunc(addrs, compareAddrs)
 
-	for _, addr := range addrs {
-		if addr.IP.To4() == nil {
-			continue
-		}
-
-		if addr.IP.IsGlobalUnicast() {
-			return addr.IP, nil
-		}
-
-		if addr.IP.IsLinkLocalUnicast() {
-			ll = addr.IP
+	// map rich ip information from netlink into the stdlib data structure
+	// while filtering addresses that aren't relevant or usable
+	ipAddrs := make([]net.IP, 0)
+	for _, i := range addrs {
+		// address must be IPv4, global unicast or link-local unicast and non-deprecated
+		if i.IP.To4() != nil &&
+			(i.IP.IsGlobalUnicast() || i.IP.IsLinkLocalUnicast()) &&
+			i.Flags&syscall.IFA_F_DEPRECATED == 0 {
+			ipAddrs = append(ipAddrs, i.IP)
 		}
 	}
 
-	if ll != nil {
-		// didn't find global but found link-local. it'll do.
-		return ll, nil
+	if len(ipAddrs) > 0 {
+		return ipAddrs, nil
 	}
 
-	return nil, errors.New("No IPv4 address found for given interface")
+	return nil, errors.New("no IPv4 address found for given interface")
 }
 
-func GetInterfaceIP6Addr(iface *net.Interface) (net.IP, error) {
+func GetInterfaceIP6Addrs(iface *net.Interface) ([]net.IP, error) {
 	addrs, err := getIfaceV6Addrs(iface)
 	if err != nil {
 		return nil, err
 	}
 
-	// prefer non link-local addr
-	var ll net.IP
+	// sort addresses in preferred usage order
+	slices.SortFunc(addrs, compareAddrs)
 
-	for _, addr := range addrs {
-		if addr.IP.To16() == nil {
-			continue
-		}
-
-		if addr.IP.IsGlobalUnicast() {
-			return addr.IP, nil
-		}
-
-		if addr.IP.IsLinkLocalUnicast() {
-			ll = addr.IP
+	// map rich ip information from netlink into the stdlib data structure
+	// while filtering addresses that aren't relevant or usable
+	ipAddrs := make([]net.IP, 0)
+	for _, i := range addrs {
+		// address must be IPv6, global unicast or link-local unicast and non-deprecated
+		if i.IP.To16() != nil &&
+			(i.IP.IsGlobalUnicast() || i.IP.IsLinkLocalUnicast()) &&
+			i.Flags&syscall.IFA_F_DEPRECATED == 0 {
+			ipAddrs = append(ipAddrs, i.IP)
 		}
 	}
 
-	if ll != nil {
-		// didn't find global but found link-local. it'll do.
-		return ll, nil
+	if len(ipAddrs) > 0 {
+		return ipAddrs, nil
 	}
 
-	return nil, errors.New("No IPv6 address found for given interface")
+	return nil, errors.New("no IPv6 address found for given interface")
 }
 
 func GetInterfaceIP4AddrMatch(iface *net.Interface, matchAddr net.IP) error {
@@ -124,7 +121,7 @@ func GetInterfaceIP4AddrMatch(iface *net.Interface, matchAddr net.IP) error {
 		}
 	}
 
-	return errors.New("No IPv4 address found for given interface")
+	return errors.New("no IPv4 address found for given interface")
 }
 
 func GetInterfaceIP6AddrMatch(iface *net.Interface, matchAddr net.IP) error {
@@ -143,7 +140,7 @@ func GetInterfaceIP6AddrMatch(iface *net.Interface, matchAddr net.IP) error {
 		}
 	}
 
-	return errors.New("No IPv6 address found for given interface")
+	return errors.New("no IPv6 address found for given interface")
 }
 
 func GetDefaultGatewayInterface() (*net.Interface, error) {
@@ -155,13 +152,13 @@ func GetDefaultGatewayInterface() (*net.Interface, error) {
 	for _, route := range routes {
 		if route.Dst == nil || route.Dst.String() == "0.0.0.0/0" {
 			if route.LinkIndex <= 0 {
-				return nil, errors.New("Found default route but could not determine interface")
+				return nil, errors.New("found default route but could not determine interface")
 			}
 			return net.InterfaceByIndex(route.LinkIndex)
 		}
 	}
 
-	return nil, errors.New("Unable to find default route")
+	return nil, errors.New("unable to find default route")
 }
 
 func GetDefaultV6GatewayInterface() (*net.Interface, error) {
@@ -173,13 +170,13 @@ func GetDefaultV6GatewayInterface() (*net.Interface, error) {
 	for _, route := range routes {
 		if route.Dst == nil || route.Dst.String() == "::/0" {
 			if route.LinkIndex <= 0 {
-				return nil, errors.New("Found default v6 route but could not determine interface")
+				return nil, errors.New("found default v6 route but could not determine interface")
 			}
 			return net.InterfaceByIndex(route.LinkIndex)
 		}
 	}
 
-	return nil, errors.New("Unable to find default v6 route")
+	return nil, errors.New("unable to find default v6 route")
 }
 
 func GetInterfaceByIP(ip net.IP) (*net.Interface, error) {
@@ -195,7 +192,7 @@ func GetInterfaceByIP(ip net.IP) (*net.Interface, error) {
 		}
 	}
 
-	return nil, errors.New("No interface with given IP found")
+	return nil, errors.New("no interface with given IP found")
 }
 
 func GetInterfaceByIP6(ip net.IP) (*net.Interface, error) {
@@ -211,7 +208,25 @@ func GetInterfaceByIP6(ip net.IP) (*net.Interface, error) {
 		}
 	}
 
-	return nil, errors.New("No interface with given IPv6 found")
+	return nil, errors.New("no interface with given IPv6 found")
+}
+
+func GetInterfaceBySpecificIPRouting(ip net.IP) (*net.Interface, net.IP, error) {
+	routes, err := netlink.RouteGet(ip)
+	if err != nil {
+		return nil, nil, fmt.Errorf("couldn't lookup route to %v: %v", ip, err)
+	}
+
+	for _, route := range routes {
+		iface, err := net.InterfaceByIndex(route.LinkIndex)
+		if err != nil {
+			return nil, nil, fmt.Errorf("couldn't lookup interface: %v", err)
+		} else {
+			return iface, route.Src, nil
+		}
+	}
+
+	return nil, nil, errors.New("no interface with given IP found")
 }
 
 func DirectRouting(ip net.IP) (bool, error) {
@@ -295,4 +310,50 @@ func EnsureV6AddressOnLink(ipa IP6Net, ipn IP6Net, link netlink.Link) error {
 	}
 
 	return nil
+}
+
+func AddBlackholeV4Route(ipV4Dest *net.IPNet) error {
+	route := netlink.Route{Dst: ipV4Dest, Type: unix.RTN_BLACKHOLE, Family: netlink.FAMILY_V4}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &route, netlink.RT_FILTER_DST|netlink.RT_FILTER_TYPE)
+	if err == nil && len(routes) == 0 {
+		err = netlink.RouteAdd(&route)
+	}
+	return err
+}
+
+func AddBlackholeV6Route(ipV6Dest *net.IPNet) error {
+	route := netlink.Route{Dst: ipV6Dest, Type: unix.RTN_BLACKHOLE, Family: netlink.FAMILY_V6}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &route, netlink.RT_FILTER_DST|netlink.RT_FILTER_TYPE)
+	if err == nil && len(routes) == 0 {
+		err = netlink.RouteAdd(&route)
+	}
+	return err
+}
+
+// compareAddrs compares two netlink address in terms of which one should be used preferably.
+// Addresses which are supposed to be completely disregarded are not considered specially and should be filtered separately
+func compareAddrs(a, b netlink.Addr) int {
+	// global unicast addresses are preferable to link-local addresses because they probably have better reachability
+	if a.IP.IsGlobalUnicast() && b.IP.IsLinkLocalUnicast() {
+		return -1
+	} else if a.IP.IsLinkLocalUnicast() && b.IP.IsGlobalUnicast() {
+		return 1
+	}
+
+	// manually assigned addresses are preferable to auto-assigned or generated addresses
+	if a.Flags&syscall.IFA_F_PERMANENT == syscall.IFA_F_PERMANENT && b.Flags&syscall.IFA_F_PERMANENT == 0 {
+		return -1
+	} else if a.Flags&syscall.IFA_F_PERMANENT == 0 && b.Flags&syscall.IFA_F_PERMANENT == syscall.IFA_F_PERMANENT {
+		return 1
+	}
+
+	// non-temporary address are preferable to temporary addresses
+	if a.Flags&syscall.IFA_F_TEMPORARY == 0 && b.Flags&syscall.IFA_F_TEMPORARY == syscall.IFA_F_TEMPORARY {
+		return -1
+	} else if a.Flags&syscall.IFA_F_TEMPORARY == syscall.IFA_F_TEMPORARY && b.Flags&syscall.IFA_F_TEMPORARY == 0 {
+		return 1
+	}
+
+	// anything else doesn't really matter
+	return 0
 }

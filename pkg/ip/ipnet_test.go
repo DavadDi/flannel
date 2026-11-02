@@ -66,11 +66,38 @@ func TestIP4(t *testing.T) {
 		t.Error("StringSep failed")
 	}
 
+	if _, err := ParseIP4("2001:db8::1"); err == nil {
+		t.Error("ParseIP4 should reject IPv6 addresses")
+	}
+
 	j, err := json.Marshal(ip)
 	if err != nil {
 		t.Error("Marshal of IP4 failed: ", err)
 	} else if string(j) != `"1.2.3.4"` {
 		t.Error("Marshal of IP4 failed with unexpected value: ", j)
+	}
+
+	addresses := []*struct {
+		ip      string
+		private bool
+	}{
+		{"192.168.0.1", true},
+		{"172.16.0.1", true},
+		{"172.31.0.1", true},
+		{"10.1.2.3", true},
+
+		{"8.8.8.8", false},
+		{"172.32.0.1", false},
+		{"192.167.0.1", false},
+		{"192.169.0.1", false},
+	}
+
+	for _, address := range addresses {
+		ip := mkIP4(address.ip)
+		is_private := ip.IsPrivate()
+		if is_private != address.private {
+			t.Errorf("%v misdetected expected private: %v got private: %v", address.ip, address.private, is_private)
+		}
 	}
 }
 
@@ -117,6 +144,10 @@ func TestIP4Net(t *testing.T) {
 		t.Error("Marshal of IP4Net failed: ", err)
 	} else if string(j) != `"1.2.3.0/24"` {
 		t.Error("Marshal of IP4Net failed with unexpected value: ", j)
+	}
+
+	if err := n1.UnmarshalJSON([]byte(`"2001:db8::/64"`)); err == nil {
+		t.Error("UnmarshalJSON should reject IPv6 CIDRs for IP4Net")
 	}
 
 	n1.IncrementIP()

@@ -44,6 +44,17 @@ func TestIP6(t *testing.T) {
 		t.Error("FromIP6 failed")
 	}
 
+	nip = net.ParseIP("::")
+	ip = FromIP6(nip)
+	ipStr = ip.String()
+	if ipStr != "::" {
+		t.Error(":: FromIP6 failed")
+	}
+
+	if !IsEmpty(ip) {
+		t.Error("IsEmpty failed")
+	}
+
 	ip, err := ParseIP6("fc00::1")
 	if err != nil {
 		t.Error("ParseIP6 failed with: ", err)
@@ -64,10 +75,49 @@ func TestIP6(t *testing.T) {
 	} else if string(j) != `"fc00::1"` {
 		t.Error("Marshal of IP6 failed with unexpected value: ", j)
 	}
+
+	addresses := []*struct {
+		ip      string
+		private bool
+	}{
+		{"fc00::1", true},
+		{"fcff::1", true},
+		{"fd00::1", true},
+		{"fdff::1", true},
+
+		{"2001::", false},
+		{"fe00::", false},
+	}
+
+	for _, address := range addresses {
+		ip := mkIP6(address.ip)
+		is_private := ip.IsPrivate()
+		if is_private != address.private {
+			t.Errorf("%v misdetected expected private=%v got private=%v", address.ip, address.private, is_private)
+		}
+	}
 }
 
 func TestIP6Net(t *testing.T) {
+	var n IP6Net
+	if !n.Empty() {
+		t.Error("Empty failed")
+	}
+
+	n = mkIP6Net("::", 0)
+	if !n.Empty() {
+		t.Error("::/0 Empty failed")
+	}
+
+	n = mkIP6Net("::", 64)
+	if n.Empty() {
+		t.Error("::/64 Empty failed")
+	}
+
 	n1 := mkIP6Net("fc00:1::", 64)
+	if n1.Empty() {
+		t.Error("fc00:1::/64 Empty failed")
+	}
 
 	if n1.ToIPNet().String() != "fc00:1::/64" {
 		t.Error("ToIPNet failed")

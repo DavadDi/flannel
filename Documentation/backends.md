@@ -4,13 +4,12 @@ Flannel may be paired with several different backends. Once set, the backend sho
 
 VXLAN is the recommended choice. host-gw is recommended for more experienced users who want the performance improvement and whose infrastructure support it (typically it can't be used in cloud environments). UDP is suggested for debugging only or for very old kernels that don't support VXLAN.
 
-AWS, GCE, and AliVPC are experimental and unsupported. Proceed at your own risk.
+In case `firewalld` is enabled on the node the port used by the backend needs to be enabled with `firewall-cmd`:
+```
+firewall-cmd --permanent --zone=public --add-port=[port]/udp
+```
 
-For more information on configuration options for cloud components, see:
-* [AliCloud VPC Backend for Flannel][alicloud-vpc]
-* [Amazon VPC Backend for Flannel][amazon-vpc]
-* [GCE Backend for Flannel][gce-backend]
-* [TencentCloud VPC Backend for Flannel][tencentcloud-vpc]
+For more information on configuration options for Tencent see [TencentCloud VPC Backend for Flannel][tencentcloud-vpc]
 
 ## Recommended backends
 
@@ -20,11 +19,19 @@ Use in-kernel VXLAN to encapsulate the packets.
 
 Type and options:
 * `Type` (string): `vxlan`
-* `VNI` (number): VXLAN Identifier (VNI) to be used. On Linux, defaults to 1. On Windows should be greater than or equal to 4096. 
+* `VNI` (number): VXLAN Identifier (VNI) to be used. On Linux, defaults to 1. On Windows should be greater than or equal to 4096.
 * `Port` (number): UDP port to use for sending encapsulated packets. On Linux, defaults to kernel default, currently 8472, but on Windows, must be 4789.
-* `GBP` (Boolean): Enable [VXLAN Group Based Policy](https://github.com/torvalds/linux/commit/3511494ce2f3d3b77544c79b87511a4ddb61dc89).  Defaults to `false`. GBP is not supported on Windows
+* `GBP` (Boolean): Enable [VXLAN Group Based Policy](https://github.com/torvalds/linux/commit/3511494ce2f3d3b77544c79b87511a4ddb61dc89). Defaults to `false`. GBP is not supported on Windows.
 * `DirectRouting` (Boolean): Enable direct routes (like `host-gw`) when the hosts are on the same subnet. VXLAN will only be used to encapsulate packets to hosts on different subnets. Defaults to `false`. DirectRouting is not supported on Windows.
-* `MacPrefix` (String): Only use on Windows, set to the MAC prefix. Defaults to `0E-2A`.
+* `Learning` (Boolean): Linux only. Controls whether the VXLAN device uses MAC learning (`learning` on the kernel link). Defaults to `false`.
+* `MTU` (number): Desired MTU for the outgoing packets. If not defined, the MTU of the external interface is used. Linux only.
+* `MacPrefix` (String): Windows only. MAC address prefix for the VXLAN interface, format `xx-xx`. Defaults to `0E-2A`.
+* `Name` (String): Windows only. Name of the VXLAN network interface. Defaults to `flannel.<VNI>` (for example `flannel.4096`).
+
+Starting with Ubuntu 21.10, vxlan support on Raspberry Pi has been moved into a separate kernel module. 
+```
+sudo apt install linux-modules-extra-raspi
+```
 
 ### host-gw
 
@@ -34,6 +41,31 @@ host-gw provides good performance, with few dependencies, and easy set up.
 
 Type:
 * `Type` (string): `host-gw`
+
+### WireGuard
+
+Use in-kernel [WireGuard](https://www.wireguard.com) to encapsulate and encrypt the packets.
+
+Type:
+* `Type` (string): `wireguard`
+* `PSK` (string): Optional. The pre shared key to use. Use `wg genpsk` to generate a key.
+* `ListenPort` (int): Optional. The udp port to listen on. Default is `51820`.
+* `ListenPortV6` (int): Optional. The udp port to listen on for ipv6. Default is `51821`.
+* `MTU` (number): Desired MTU for the outgoing packets if not defined the MTU of the external interface is used.
+* `Mode` (string): Optional.
+    * separate - Use separate wireguard tunnels for ipv4 and ipv6 (default)
+    * auto - Single wireguard tunnel for both address families; autodetermine the preferred peer address
+    * ipv4 - Single wireguard tunnel for both address families; use ipv4 for
+      the peer addresses
+    * ipv6 - Single wireguard tunnel for both address families; use ipv6 for
+      the peer addresses
+* `PersistentKeepaliveInterval` (int): Optional. Default is 0 (disabled).
+
+If no private key was generated before the private key is written to `/run/flannel/wgkey`. You can use environment `WIREGUARD_KEY_FILE` to change this path.
+
+The static names of the interfaces are `flannel-wg` and `flannel-wg-v6`. WireGuard tools like `wg show` can be used to debug interfaces and peers.
+
+Users of kernels < 5.6 need to [install](https://www.wireguard.com/install/) an additional Wireguard package.
 
 ### UDP
 
@@ -47,61 +79,12 @@ Type and options:
 
 The following options are experimental and unsupported at this time.
 
-### AliVPC
-
-Use AliVPC to create IP routes in a [alicloud VPC route table](https://vpc.console.aliyun.com) when running in an AliCloud VPC. This mitigates the need to create a separate flannel interface.
-
-Requirements:
-* Running on an ECS instance that is in an AliCloud VPC.
-* Permission require `accessid` and `keysecret`.
-    * `Type` (string): `ali-vpc`
-    * `AccessKeyID` (string): API access key ID. Can also be configured with environment ACCESS_KEY_ID.
-    * `AccessKeySecret` (string): API access key secret. Can also be configured with environment ACCESS_KEY_SECRET.
-
-Route Limits: AliCloud VPC limits the number of entries per route table to 50.
-
 ### Alloc
 
 Alloc performs subnet allocation with no forwarding of data packets.
 
 Type:
 * `Type` (string): `alloc`
-
-### AWS VPC
-
-Recommended when running within an Amazon VPC, AWS VPC creates IP routes in an [Amazon VPC route table](http://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/VPC_Route_Tables.html). Because AWS knows about the IP, it is possible to set up ELB to route directly to that container.
-
-Requirements:
-* Running on an EC2 instance that is in an Amazon VPC.
-* Permissions required: `CreateRoute`, `DeleteRoute`,`DescribeRouteTables`, `ModifyNetworkInterfaceAttribute`, `DescribeInstances` (optional)
-
-Type and options:
-* `Type` (string): `aws-vpc`
-* `RouteTableID` (string): [optional] The ID of the VPC route table to add routes to.
-    * The route table must be in the same region as the EC2 instance that flannel is running on.
-    * Flannel can automatically detect the ID of the route table if the optional `DescribeInstances` is granted to the EC2 instance.
-
-Authentication is handled via either environment variables or the node's IAM role. If the node has insufficient privileges to modify the VPC routing table specified, ensure that appropriate `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SECURITY_TOKEN` environment variables are set when running the `flanneld` process.
-
-Route Limits: AWS [limits](http://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/VPC_Appendix_Limits.html) the number of entries per route table to 50.
-
-### GCE
-
-Use the GCE backend When running on [Google Compute Engine Network](https://cloud.google.com/compute/docs/networking#networks). Instead of using encapsulation, GCE manipulates IP routes to achieve maximum performance. Because of this, a separate flannel interface is not created.
-
-Requirements:
-* [Enable IP forwarding for the instances](https://cloud.google.com/compute/docs/networking#canipforward).
-* [Instance service account](https://cloud.google.com/compute/docs/authentication#using) with read-write compute permissions.
-
-Type:
-* `Type` (string): `gce`
-
-Command to create a compute instance with the correct permissions and IP forwarding enabled:
-```sh
-  $ gcloud compute instances create INSTANCE --can-ip-forward --scopes compute-rw
-```
-
-Route Limits: GCE [limits](https://cloud.google.com/compute/docs/resource-quotas) the number of routes for every *project* to 100 by default.
 
 ### TencentCloud VPC
 
@@ -117,10 +100,6 @@ Requirements:
 Route Limits: TencentCloud VPC limits the number of entries per route table to 50.
 
 
-
-[alicloud-vpc]: https://github.com/flannel-io/flannel/blob/master/Documentation/alicloud-vpc-backend.md
-[amazon-vpc]: https://github.com/flannel-io/flannel/blob/master/Documentation/aws-vpc-backend.md
-[gce-backend]: https://github.com/flannel-io/flannel/blob/master/Documentation/gce-backend.md
 [tencentcloud-vpc]: https://github.com/flannel-io/flannel/blob/master/Documentation/tencentcloud-vpc-backend.md
 
 
@@ -156,7 +135,7 @@ Add rules to your firewall: Open ports 50 (for ESP protocol), UDP 500 (for IKE, 
 
 #### Troubleshooting
 Logging
-* When flannel is run from a container, the Strongswan tools are installed. `swanctl` can be used for interacting with the charon and it provides a logs command.. 
+* When flannel is run from a container, the Strongswan tools are installed. `swanctl` can be used for interacting with the charon and it provides a logs command. 
 * Charon logs are also written to the stdout of the flannel process. 
 
 Troubleshooting
